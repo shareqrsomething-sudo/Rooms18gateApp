@@ -1,11 +1,12 @@
 {
   "name": "rooms18gateapp",
   "version": "1.0.0",
-  "description": "Rooms app with 18+ gate and per-room file uploads",
-  "main": "src/app.js",
   "type": "module",
+  "main": "app.js",
   "scripts": {
-    "start": "node src/app.js"
+    "start": "node app.js",
+    "render-build": "echo 'build step not required'",
+    "render-start": "node app.js"
   },
   "dependencies": {
     "express": "^4.19.2",
