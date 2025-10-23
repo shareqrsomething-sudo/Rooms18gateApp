@@ -1,16 +1,17 @@
 {
-  "name": "express-hello-world",
+  "name": "rooms18gate",
   "version": "1.0.0",
-  "description": "Express Hello World on Render",
-  "main": "app.js",
-  "repository": "https://github.com/render-examples/express-hello-world",
-  "author": "Render Developers",
-  "license": "MIT",
-  "private": false,
+  "type": "module",
   "scripts": {
     "start": "node app.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "express": "^5.0.0"
+    "express": "^4.18.2",
+    "mime-types": "^2.1.35",
+    "multer": "^1.4.5-lts.1",
+    "nanoid": "^4.0.2"
   }
 }
