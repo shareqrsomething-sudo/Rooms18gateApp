@@ -1,10 +1,13 @@
 {
-  "name": "rooms18gateapp",
+  "name": "rooms18gate-app",
   "version": "1.0.0",
   "type": "module",
-  "main": "app.js",
+  "private": true,
   "scripts": {
     "start": "node app.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "cookie-parser": "^1.4.6",
