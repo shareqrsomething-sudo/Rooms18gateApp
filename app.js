@@ -1,8 +1,8 @@
 // Rooms app with:
 // • 18+ gate on every room
 // • Per-room uploads + gallery (no login for visitors)
-// • Admin delete via password (button prompts; no URL tricks)
-// • Free & self-contained
+// • Admin delete (files) + **Delete whole room** via password
+// • Mobile-friendly single-file server
 
 import fs from "fs";
 import path from "path";
@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const ADMIN_PASS = process.env.ADMIN_PASS || "letmein"; // change on Render > Environment
+const ADMIN_PASS = process.env.ADMIN_PASS || "letmein"; // set on Render → Environment
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 
 app.use(express.json());
@@ -28,7 +28,7 @@ app.use("/static", express.static(path.join(__dirname, "static")));
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// ----- storage (per-room folder) -----
+// ---------- storage (per-room) ----------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const room = (req.params.room || "general").toLowerCase();
@@ -43,7 +43,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// ----- helpers -----
+// ---------- helpers ----------
 const isAdminReq = (req) => req.cookies && req.cookies.admin === "1";
 
 const listFiles = (room) => {
@@ -62,17 +62,10 @@ const listFiles = (room) => {
   }).sort((a,b)=>b.mtime - a.mtime);
 };
 
-// ----- 18+ gate middleware -----
-app.use((req, res, next) => {
-  // simple sessionStorage check happens in the client HTML
-  next();
-});
-
-// ----- Admin login/logout (no URL params) -----
+// ---------- admin login/logout ----------
 app.post("/admin", (req, res) => {
   const { pass } = req.body || {};
   if (pass === ADMIN_PASS) {
-    // cookie lasts 1 day
     res.cookie("admin", "1", { httpOnly: true, sameSite: "lax", maxAge: 24*60*60*1000 });
     return res.json({ ok: true });
   }
@@ -84,7 +77,7 @@ app.post("/admin/logout", (req, res) => {
   res.json({ ok: true });
 });
 
-// ----- Rooms -----
+// ---------- routes ----------
 app.get("/", (req, res) => res.redirect("/room/general"));
 
 app.get("/room/:room", (req, res) => {
@@ -109,12 +102,12 @@ app.get("/room/:room", (req, res) => {
     button,.btn,input[type=file]{background:#374151;color:#fff;border:1px solid #4b5563;border-radius:10px;padding:12px 14px;cursor:pointer}
     .ok{background:var(--ok);border-color:#15803d}
     .bad{background:var(--bad);border-color:#b91c1c}
+    .warn{background:var(--warn);border-color:#b45309}
     .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:16px}
     .tile{background:#0f172a;border-radius:12px;padding:12px;border:1px solid #1f2937}
     .tile img{display:block;width:100%;height:150px;object-fit:cover;border-radius:8px}
     .meta{font-size:12px;color:var(--mut);margin:6px 0 10px}
     .hide{display:none}
-    /* Age gate */
     #ageGate{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center}
     #ageGate .card{max-width:520px}
   </style>
@@ -130,8 +123,9 @@ app.get("/room/:room", (req, res) => {
         <button id="up" class="ok">Upload</button>
         <button id="ref">Refresh</button>
         <span style="flex:1"></span>
-        <button id="adminBtn">Admin</button>
-        <button id="logoutBtn" class="bad ${admin ? "" : "hide"}">Exit admin</button>
+        <button id="adminBtn" ${admin ? 'class="hide"' : ""}>Admin</button>
+        <button id="logoutBtn" class="${admin ? '' : 'hide'} bad">Exit admin</button>
+        ${admin ? `<button id="deleteRoomBtn" class="bad">Delete Room</button>` : ""}
       </div>
 
       <div id="warn" class="hide" style="color:#fbbf24;margin:8px 0">Uploading…</div>
@@ -167,9 +161,8 @@ app.get("/room/:room", (req, res) => {
 
 <script>
   const room = ${JSON.stringify(room)};
-  const adminOn = ${admin ? "true" : "false"};
 
-  // 18+ gate using sessionStorage
+  // 18+ gate via sessionStorage
   const gate = document.getElementById('ageGate');
   if (sessionStorage.getItem('age-ok') === '1') gate.style.display = 'none';
   document.getElementById('yes').onclick = () => { sessionStorage.setItem('age-ok','1'); gate.style.display='none'; };
@@ -189,7 +182,21 @@ app.get("/room/:room", (req, res) => {
   };
   document.getElementById('ref').onclick = () => location.reload();
 
-  // Delete (admin only)
+  // Admin login/logout
+  const adminBtn = document.getElementById('adminBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (adminBtn) adminBtn.onclick = async () => {
+    const pass = prompt('Admin password');
+    if (!pass) return;
+    const r = await fetch('/admin', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pass })});
+    if (r.ok) location.reload(); else alert('Wrong password');
+  };
+  if (logoutBtn) logoutBtn.onclick = async () => {
+    await fetch('/admin/logout', { method:'POST' });
+    location.reload();
+  };
+
+  // Delete single file (admin)
   document.querySelectorAll('.del').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Delete this file?')) return;
@@ -200,33 +207,32 @@ app.get("/room/:room", (req, res) => {
     };
   });
 
-  // Admin login (no URL changes)
-  const adminBtn = document.getElementById('adminBtn');
-  const logoutBtn = document.getElementById('logoutBtn');
-  if (adminOn) adminBtn.classList.add('hide');
-  adminBtn.onclick = async () => {
-    const pass = prompt('Admin password');
-    if (!pass) return;
-    const r = await fetch('/admin', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pass })});
-    if (r.ok) location.reload(); else alert('Wrong password');
-  };
-  logoutBtn.onclick = async () => {
-    await fetch('/admin/logout', { method:'POST' });
-    location.reload();
-  };
+  // **Delete whole room** (admin)
+  const deleteRoomBtn = document.getElementById('deleteRoomBtn');
+  if (deleteRoomBtn) {
+    deleteRoomBtn.onclick = async () => {
+      const conf = prompt('Type the room name to delete the ENTIRE room:\\n' + room);
+      if (conf !== room) return;
+      if (!confirm('This will delete ALL files in ' + room + '. Continue?')) return;
+      const r = await fetch('/delete-room/' + encodeURIComponent(room), { method:'POST' });
+      if (!r.ok) return alert('Delete room failed');
+      // After deletion, send them to /room/general
+      location.href = '/room/general';
+    };
+  }
 </script>
 </body>
 </html>`;
   res.type("html").send(html);
 });
 
-// Upload
+// Upload a file
 app.post("/upload/:room", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).json({ ok:false, msg:"no-file" });
   res.json({ ok:true });
 });
 
-// Delete (admin only)
+// Delete one file (admin)
 app.post("/delete/:room/:name", (req, res) => {
   if (!isAdminReq(req)) return res.status(401).json({ ok:false, msg:"admin-required" });
   const room = req.params.room.toLowerCase();
@@ -234,6 +240,26 @@ app.post("/delete/:room/:name", (req, res) => {
   const p = path.join(UPLOAD_DIR, room, file);
   if (!p.startsWith(path.join(UPLOAD_DIR, room))) return res.status(400).json({ ok:false });
   try { fs.unlinkSync(p); } catch { /* ignore */ }
+  res.json({ ok:true });
+});
+
+// **Delete entire room** (admin)
+app.post("/delete-room/:room", (req, res) => {
+  if (!isAdminReq(req)) return res.status(401).json({ ok:false, msg:"admin-required" });
+  const room = (req.params.room || "").toLowerCase();
+  if (!room) return res.status(400).json({ ok:false, msg:"bad-room" });
+
+  const dir = path.join(UPLOAD_DIR, room);
+  // Safety: ensure we only remove inside UPLOAD_DIR
+  if (!dir.startsWith(UPLOAD_DIR)) return res.status(400).json({ ok:false });
+
+  try {
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } catch (e) {
+    return res.status(500).json({ ok:false, msg:"rm-failed" });
+  }
   res.json({ ok:true });
 });
 
