@@ -20,6 +20,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));   // <- added
 app.use(cookieParser());
 
 // ---- CONFIG ----
@@ -196,6 +197,7 @@ app.get("/room/:room", async (req, res) => {
     </div>`;
   }).join("");
 
+  // NOTE: delete-room form is now OUTSIDE the upload form (no nesting)
   const html = `<!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Room: ${room}</title>
@@ -218,9 +220,13 @@ h1{margin:0 0 16px}.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
     <input id="file" type="file" name="file" />
     <button class="ok" type="submit">Upload</button>
     <a class="btn" href="/">Rooms</a>
-    ${admin ? `<form method="post" action="/delete-room/${room}" onsubmit="return confirm('Delete entire room?')">
-      <button class="bad" type="submit">Delete Room</button></form>` : ""}
   </form>
+
+  ${admin ? `
+    <form class="row" method="post" action="/delete-room/${encodeURIComponent(room)}"
+          onsubmit="return confirm('Delete entire room \"${room}\" and all files?')">
+      <button class="bad" type="submit">Delete Room</button>
+    </form>` : ""}
 
   <div class="grid">${items || `<div style="color:#9ca3af">No files yet.</div>`}</div>
 </div></div>
