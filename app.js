@@ -1,4 +1,4 @@
-// app.js — Rooms with hard 18+ gate (no nested template literals)
+// app.js — thumbnails, single-click upload, no admin mode
 
 import fs from "fs";
 import path from "path";
@@ -16,12 +16,10 @@ const PORT = process.env.PORT || 3000;
 
 // ---------- config ----------
 const DATA = path.join(__dirname, "data");
-const ADMIN_PASS = process.env.ADMIN_PASS || "letmein";        // set in Render
-const COOKIE_SECRET = process.env.COOKIE_SECRET || "change-me"; // set in Render
+const COOKIE_SECRET = process.env.COOKIE_SECRET || "change-me";
 const AGE_COOKIE = "age_ok";
 const MAX_UPLOAD_MB = 50;
 
-// ensure data dir
 fs.mkdirSync(DATA, { recursive: true });
 
 // uploads per room -> ./data/<room>/
@@ -47,12 +45,11 @@ const upload = multer({
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(cookieParser(COOKIE_SECRET));
-app.use("/static", express.static(path.join(__dirname, "static")));
 
-// 18+ gate middleware
+// 18+ gate
 const ageGate = (req, res, next) => {
   const open = ["/gate", "/gate/ok", "/gate/reset", "/healthz"];
-  if (open.includes(req.path) || req.path.startsWith("/static/")) return next();
+  if (open.includes(req.path)) return next();
   if (req.signedCookies[AGE_COOKIE] === "1") return next();
   res.redirect("/gate?next=" + encodeURIComponent(req.originalUrl));
 };
@@ -102,69 +99,34 @@ const listRooms = () =>
 
 const isValidRoom = name => /^[a-z0-9-]{1,40}$/.test(name);
 
-// ---------- landing (no create unless admin) ----------
+// ---------- landing (no admin UI) ----------
 app.get("/", (req, res) => {
   const rooms = listRooms();
-  const isAdmin = req.query.admin === ADMIN_PASS;
 
-  let listHtml = rooms.length
+  const listHtml = rooms.length
     ? "<ul>" + rooms.map(r =>
         "<li class='room'><a class='btn' href='/r/" + encodeURIComponent(r) +
         "'>Enter: " + r + "</a></li>"
       ).join("") + "</ul>"
     : "<p>No rooms yet.</p>";
 
-  const adminBtn = isAdmin
-    ? "<a class='btn' href='/'>Exit admin</a>"
-    : "<a class='btn' href='/?admin=" + encodeURIComponent(ADMIN_PASS) + "'>Admin</a>";
-
-  const createUI = isAdmin ? (
-    "<h2>Create room</h2>" +
-    "<form method='post' action='/rooms" + (isAdmin ? "?admin=" + encodeURIComponent(ADMIN_PASS) : "") + "'>" +
-    "<input name='name' placeholder='room-name (letters/numbers/dashes)' required pattern='[a-z0-9-]{1,40}'>" +
-    "<button type='submit'>Create</button></form>"
-  ) : "";
-
   res.send(
-    "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>" +
-    "<title>Rooms</title>" +
+    "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'><title>Rooms</title>" +
     "<style>body{background:#0b0c0f;color:#eaeef5;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:26px}" +
     ".card{background:#111827;border:1px solid #232936;border-radius:14px;padding:22px;max-width:760px;margin:0 auto}" +
     "h1{margin:0 0 12px} h2{margin:18px 0 10px}" +
-    "a.btn,button{display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;border:0;font-weight:700}" +
-    "ul{list-style:none;padding:0;margin:10px 0 0} li{margin:6px 0}" +
-    ".room{background:#0f172a;border-radius:8px;padding:10px 12px;border:1px solid #23303f}" +
-    "input{background:#0f172a;border:1px solid #23303f;color:#eaeef5;border-radius:8px;padding:10px;width:100%;max-width:360px;margin-right:8px}" +
+    "a.btn{display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;font-weight:700}" +
+    "ul{list-style:none;padding:0;margin:10px 0 0} li{margin:6px 0}.room{background:#0f172a;border-radius:8px;padding:10px 12px;border:1px solid #23303f}" +
+    "form{margin-top:18px;display:flex;gap:8px;flex-wrap:wrap} input{background:#0f172a;border:1px solid #23303f;color:#eaeef5;border-radius:8px;padding:10px}" +
     "</style>" +
-    "<div class='card'>" +
-    "<div style='display:flex;justify-content:space-between;align-items:center'><h1>Rooms</h1>" +
-    adminBtn + "</div>" +
-    "<h2>Existing rooms</h2>" + listHtml + createUI +
+    "<div class='card'><h1>Rooms</h1>" +
+    "<p><small>(This page lists rooms only. Room creation/deletion isn’t exposed here.)</small></p>" +
+    "<h2>Existing rooms</h2>" + listHtml +
     "</div>"
   );
 });
 
-// create room (admin)
-app.post("/rooms", (req, res) => {
-  if (req.query.admin !== ADMIN_PASS) return res.status(403).send("Admin only");
-  const name = (req.body.name || "").trim();
-  if (!isValidRoom(name)) return res.status(400).send("Invalid room name");
-  fs.mkdirSync(path.join(DATA, name), { recursive: true });
-  res.redirect("/?admin=" + encodeURIComponent(ADMIN_PASS));
-});
-
-// delete room (admin + confirm)
-app.post("/r/:room/delete", (req, res) => {
-  if (req.query.admin !== ADMIN_PASS) return res.status(403).send("Admin only");
-  const room = req.params.room;
-  const confirm = req.body.confirm || "";
-  if (confirm !== room) return res.status(400).send("Type the room name to confirm deletion.");
-  const dir = path.join(DATA, room);
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  res.redirect("/?admin=" + encodeURIComponent(ADMIN_PASS));
-});
-
-// room page
+// ---------- room page (thumbnails + single-click upload) ----------
 app.get("/r/:room", (req, res) => {
   const room = req.params.room;
   if (!isValidRoom(room)) return res.status(404).send("Room not found");
@@ -174,75 +136,63 @@ app.get("/r/:room", (req, res) => {
   const files = fs.readdirSync(dir).map(name => {
     const p = path.join(dir, name);
     const stat = fs.statSync(p);
-    return { name, bytes: stat.size, type: mime.lookup(name) || "application/octet-stream" };
+    const type = mime.lookup(name) || "application/octet-stream";
+    return { name, bytes: stat.size, type, isImage: type.startsWith("image/") };
   });
 
-  const admin = req.query.admin === ADMIN_PASS;
-
-  // build items without nested backticks
   const items = files.map(f => {
     const enc = encodeURIComponent(f.name);
     const href = "/file/" + encodeURIComponent(room) + "/" + enc;
-    const del = admin
-      ? "<form method='post' action='/delete/" + encodeURIComponent(room) + "/" + enc +
-        "?admin=" + encodeURIComponent(ADMIN_PASS) +
-        "' onsubmit='return confirm(\"Delete " + (f.name.replace(/"/g, "&quot;")) + "?\")'>" +
-        "<button class='del'>Delete</button></form>"
-      : "";
-    return "<div class='item'><div style='margin:6px 0 8px;word-break:break-word'>" +
-           f.name + "</div><a class='btn' href='" + href + "' download>Download</a> " + del + "</div>";
+    const thumb = f.isImage
+      ? "<a href='" + href + "' target='_blank' rel='noopener'>" +
+        "<img src='" + href + "' alt='' loading='lazy' /></a>"
+      : "<div class='icon' aria-hidden='true'>📄</div>";
+
+    return "<div class='item'>" + thumb +
+           "<div class='name' title='" + f.name.replace(/"/g, "&quot;") + "'>" + f.name + "</div>" +
+           "<a class='btn small' href='" + href + "' download>Download</a>" +
+           "</div>";
   }).join("");
 
-  const adminToggle = admin
-    ? "<a class='btn' href='/r/" + encodeURIComponent(room) + "'>Exit admin</a>"
-    : "<a class='btn' href='/r/" + encodeURIComponent(room) + "?admin=" + encodeURIComponent(ADMIN_PASS) + "'>Admin</a>";
-
   res.send(
-    "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'>" +
-    "<title>Room: " + room + "</title>" +
+    "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'><title>Room: " + room + "</title>" +
     "<style>body{background:#0b0c0f;color:#eaeef5;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:26px}" +
-    ".card{background:#111827;border:1px solid #232936;border-radius:14px;padding:22px;max-width:900px;margin:0 auto}" +
-    ".grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}" +
+    ".card{background:#111827;border:1px solid #232936;border-radius:14px;padding:22px;max-width:1100px;margin:0 auto}" +
+    "h1{margin:0 0 12px} a.btn,button{display:inline-block;background:#3b82f6;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;border:0;font-weight:700}" +
+    "a.btn.small{padding:8px 12px;font-weight:700}" +
+    ".grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}" +
     ".item{background:#0f172a;border:1px solid #23303f;border-radius:10px;padding:10px}" +
-    "a.btn,button{display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;border:0;font-weight:700}" +
-    ".del{background:#dc2626}" +
-    "input{background:#0f172a;border:1px solid #23303f;color:#eaeef5;border-radius:8px;padding:10px}" +
+    ".item img{display:block;width:100%;height:160px;object-fit:cover;border-radius:8px;border:1px solid #23303f;background:#0b0c0f}" +
+    ".icon{display:grid;place-items:center;width:100%;height:160px;border-radius:8px;border:1px solid #23303f;background:#0b0c0f;font-size:42px}" +
+    ".name{margin:8px 0 10px;word-break:break-word;min-height:2.4em}" +
+    "form.up{margin:10px 0 18px;display:flex;gap:10px;flex-wrap:wrap}" +
+    "input[type=file]{background:#0f172a;border:1px solid #23303f;color:#eaeef5;border-radius:8px;padding:10px}" +
     "</style>" +
     "<div class='card'>" +
     "<div style='display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap'>" +
-    "<h1>Room: " + room + "</h1><div><a class='btn' href='/'>Rooms</a> " + adminToggle + "</div></div>" +
-    "<form method='post' action='/upload/" + encodeURIComponent(room) + "' enctype='multipart/form-data' " +
-    "style='margin:10px 0 18px;display:flex;gap:10px;flex-wrap:wrap'>" +
-    "<input type='file' name='file' required><button type='submit'>Upload</button></form>" +
-    (admin
-      ? "<form method='post' action='/r/" + encodeURIComponent(room) + "/delete?admin=" + encodeURIComponent(ADMIN_PASS) +
-        "' onsubmit='return confirm(\"Type the room name to confirm deletion\")' style='margin:4px 0 16px'>" +
-        "<input name='confirm' placeholder=\"type '" + room + "' to delete room\" required pattern='" + room + "'>" +
-        "<button class='del' type='submit'>Delete Room</button></form>"
-      : "") +
-    "<div class='grid'>" + items + "</div></div>"
+    "<h1>Room: " + room + "</h1><div><a class='btn' href='/'>Rooms</a></div></div>" +
+    "<form class='up' method='post' action='/upload/" + encodeURIComponent(room) + "' enctype='multipart/form-data' onsubmit='return lockUpload(this)'>" +
+    "<input id='f' type='file' name='file' accept='*' required>" +
+    "<button id='u' type='submit'>Upload</button>" +
+    "</form>" +
+    "<div class='grid'>" + items + "</div>" +
+    "</div>" +
+    "<script>function lockUpload(form){var u=document.getElementById('u');var f=document.getElementById('f');if(!f.files||!f.files[0])return false;u.disabled=true;u.textContent='Uploading…';setTimeout(function(){f.value='';},0);return true;}</script>"
   );
 });
 
-// upload one file
+// ---------- upload ----------
 app.post("/upload/:room", upload.single("file"), (req, res) => {
   if (!req.file) return res.status(400).send("No file");
+  // redirect back to room after upload; file input is cleared by client script
   res.redirect("/r/" + encodeURIComponent(req.params.room));
 });
 
-// serve / download a file
+// ---------- file serving ----------
 app.get("/file/:room/:name", (req, res) => {
   const p = path.join(DATA, req.params.room, req.params.name);
   if (!fs.existsSync(p)) return res.status(404).send("Not found");
-  res.download(p, req.params.name);
-});
-
-// delete a file (admin)
-app.post("/delete/:room/:name", (req, res) => {
-  if (req.query.admin !== ADMIN_PASS) return res.status(403).send("Admin only");
-  const p = path.join(DATA, req.params.room, req.params.name);
-  if (fs.existsSync(p)) fs.unlinkSync(p);
-  res.redirect("/r/" + encodeURIComponent(req.params.room) + "?admin=" + encodeURIComponent(ADMIN_PASS));
+  res.sendFile(p); // show inline (lets <img> work); user can still download via btn
 });
 
 // health
