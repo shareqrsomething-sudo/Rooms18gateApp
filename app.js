@@ -1,14 +1,15 @@
 // Rooms app with:
-// - 18+ gate on every room
-// - Per-room uploads + gallery (no login for visitors)
-// - Admin delete via password (?admin=PASS reveals delete links)
-// - Mobile-friendly single-file server
+// • 18+ gate on every room
+// • Per-room uploads + gallery (no login for visitors)
+// • Admin delete via password (button prompts; no URL tricks)
+// • Free & self-contained
 
 import fs from "fs";
 import path from "path";
 import express from "express";
 import multer from "multer";
 import mime from "mime-types";
+import cookieParser from "cookie-parser";
 import { nanoid } from "nanoid";
 import { fileURLToPath } from "url";
 
@@ -17,193 +18,225 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const ADMIN_PASS = process.env.ADMIN_PASS || "letmein"; // change on Render > Environment
+const UPLOAD_DIR = path.join(__dirname, "uploads");
 
-// ====== CONFIG ======
-const DATA_DIR = path.join(__dirname, "uploads");
-const ADMIN_PASS = process.env.ADMIN_PASS || "letmein";
-const MAX_MB = Number(process.env.MAX_MB || 50);
+app.use(express.json());
+app.use(cookieParser());
+app.use("/uploads", express.static(UPLOAD_DIR));
+app.use("/static", express.static(path.join(__dirname, "static")));
 
-// ensure uploads dir exists
-fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// ====== HELPERS ======
-function roomDir(room) {
-  const safe = String(room).trim().replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 60);
-  const dir = path.join(DATA_DIR, safe || "room");
-  fs.mkdirSync(dir, { recursive: true });
-  return { safe, dir };
-}
-
-function listFiles(dir) {
-  const items = [];
-  for (const name of fs.readdirSync(dir)) {
-    const full = path.join(dir, name);
-    const stat = fs.statSync(full);
-    if (stat.isFile()) {
-      const size = stat.size;
-      const type = mime.lookup(name) || "application/octet-stream";
-      items.push({ name, size, type, mtime: stat.mtimeMs });
-    }
-  }
-  // newest first
-  items.sort((a, b) => b.mtime - a.mtime);
-  return items;
-}
-
-function human(bytes) {
-  const u = ["B", "KB", "MB", "GB"];
-  let i = 0;
-  let n = bytes;
-  while (n >= 1024 && i < u.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return `${n.toFixed(1)} ${u[i]}`;
-}
-
-// ====== MULTER (per-room destination) ======
+// ----- storage (per-room folder) -----
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const { dir } = roomDir(req.params.room || req.body.room || "room");
+    const room = (req.params.room || "general").toLowerCase();
+    const dir = path.join(UPLOAD_DIR, room);
+    fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || mime.extension(file.mimetype) || "";
-    const base = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^\w\-]+/g, "-");
-    cb(null, `${base}-${nanoid(6)}${ext ? "." + ext.replace(/^\./, "") : ""}`);
-  },
+    const ext = mime.extension(file.mimetype) || "bin";
+    cb(null, `${Date.now()}_${nanoid(6)}.${ext}`);
+  }
 });
-const upload = multer({
-  storage,
-  limits: { fileSize: MAX_MB * 1024 * 1024 },
+const upload = multer({ storage });
+
+// ----- helpers -----
+const isAdminReq = (req) => req.cookies && req.cookies.admin === "1";
+
+const listFiles = (room) => {
+  const dir = path.join(UPLOAD_DIR, room);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).map(name => {
+    const p = path.join(dir, name);
+    const s = fs.statSync(p);
+    return {
+      name,
+      size: s.size,
+      mtime: s.mtimeMs,
+      type: mime.lookup(p) || "application/octet-stream",
+      url: `/uploads/${encodeURIComponent(room)}/${encodeURIComponent(name)}`
+    };
+  }).sort((a,b)=>b.mtime - a.mtime);
+};
+
+// ----- 18+ gate middleware -----
+app.use((req, res, next) => {
+  // simple sessionStorage check happens in the client HTML
+  next();
 });
 
-// ====== STATIC SERVE FOR UPLOADS ======
-app.use("/u", express.static(DATA_DIR, { fallthrough: false }));
-
-// ====== HTML SHARED PIECES ======
-const CSS = `
-:root{--bg:#0b0c0f;--card:#111827;--mut:#9ca3af;--fg:#e5e7eb;--btn:#2563eb;--ok:#16a34a;--warn:#f59e0b;--bad:#dc2626}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:16px system-ui,Segoe UI,Roboto,Arial}
-.card{width:min(92vw,980px);background:var(--card);border:1px solid #1f2937;border-radius:16px;padding:18px;box-shadow:0 10px 40px rgba(0,0,0,.35)}
-h1{margin:0 0 8px;font-size:28px}p{margin:0 0 14px;color:var(--mut)}
-.row{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
-.btn{padding:10px 14px;border-radius:10px;border:1px solid #2b3443;background:#111827;color:#e5e7eb;text-decoration:none}
-.btn.ok{background:var(--ok);border-color:#1a9b45}
-.btn.warn{background:var(--warn);border-color:#d1870a;color:#111}
-.btn.bad{background:var(--bad);border-color:#b71c1c}
-.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
-.item{background:#0f1624;border:1px solid #1f2937;border-radius:12px;padding:8px}
-.item .name{font-size:12px;opacity:.9;word-break:break-word}
-.item .meta{font-size:11px;color:var(--mut)}
-.thumb{width:100%;height:120px;object-fit:cover;border-radius:8px;display:block;background:#090f1a}
-.hide{display:none}
-.notice{color:#fbbf24;margin-top:10px}
-`;
-
-function page({ title, body, scripts = "" }) {
-  return `<!doctype html><html><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title><style>${CSS}</style>
-</head><body>${body}${scripts}</body></html>`;
-}
-
-// ====== AGE GATE + ROOM VIEW ======
-app.get("/", (req, res) => {
-  res.redirect("/room/general");
+// ----- Admin login/logout (no URL params) -----
+app.post("/admin", (req, res) => {
+  const { pass } = req.body || {};
+  if (pass === ADMIN_PASS) {
+    // cookie lasts 1 day
+    res.cookie("admin", "1", { httpOnly: true, sameSite: "lax", maxAge: 24*60*60*1000 });
+    return res.json({ ok: true });
+  }
+  res.status(401).json({ ok: false, msg: "wrong-password" });
 });
+
+app.post("/admin/logout", (req, res) => {
+  res.clearCookie("admin");
+  res.json({ ok: true });
+});
+
+// ----- Rooms -----
+app.get("/", (req, res) => res.redirect("/room/general"));
 
 app.get("/room/:room", (req, res) => {
-  const { safe, dir } = roomDir(req.params.room);
-  const files = listFiles(dir);
-  const admin = (req.query.admin || "") === ADMIN_PASS;
+  const room = (req.params.room || "general").toLowerCase();
+  const files = listFiles(room);
+  const admin = isAdminReq(req);
 
-  const gallery = files
-    .map((f) => {
-      const isImg = String(f.type).startsWith("image/");
-      const href = `/u/${safe}/${encodeURIComponent(f.name)}`;
-      const thumb = isImg
-        ? `<img class="thumb" src="${href}" alt="">`
-        : `<div class="thumb" style="display:grid;place-items:center;font-size:40px;opacity:.6">📄</div>`;
+  const html = /*html*/`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Room: ${room}</title>
+  <style>
+    :root{--bg:#0b0c0f;--card:#111827;--mut:#9ca3af;--fg:#e5e7eb;--u:#4f46e5;--ok:#16a34a;--warn:#f59e0b;--bad:#ef4444}
+    body{margin:0;display:grid;min-height:100vh;place-items:start;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto,Ubuntu,Arial}
+    .wrap{max-width:900px;width:96vw;margin:24px auto}
+    .card{background:var(--card);border-radius:14px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    h1{margin:0 0 16px;font-size:28px}
+    p{margin:0 0 10px;color:var(--mut)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+    button,.btn,input[type=file]{background:#374151;color:#fff;border:1px solid #4b5563;border-radius:10px;padding:12px 14px;cursor:pointer}
+    .ok{background:var(--ok);border-color:#15803d}
+    .bad{background:var(--bad);border-color:#b91c1c}
+    .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:16px}
+    .tile{background:#0f172a;border-radius:12px;padding:12px;border:1px solid #1f2937}
+    .tile img{display:block;width:100%;height:150px;object-fit:cover;border-radius:8px}
+    .meta{font-size:12px;color:var(--mut);margin:6px 0 10px}
+    .hide{display:none}
+    /* Age gate */
+    #ageGate{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center}
+    #ageGate .card{max-width:520px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Room: ${room}</h1>
+      <p>Upload and view files for this room.</p>
 
-      const del = admin
-        ? `<a class="btn bad" href="/delete/${encodeURIComponent(safe)}/${encodeURIComponent(f.name)}?admin=${encodeURIComponent(
-            ADMIN_PASS
-          )}" onclick="return confirm('Delete ${f.name}?')">Delete</a>`
-        : "";
-
-      return `<div class="item">
-        <a href="${href}" target="_blank">${thumb}</a>
-        <div class="name">${f.name}</div>
-        <div class="meta">${f.type} • ${human(f.size)}</div>
-        <div class="row">${del}<a class="btn" href="${href}" download>Download</a></div>
-      </div>`;
-    })
-    .join("");
-
-  const body = `
-  <div class="card">
-    <h1>Room: ${safe}</h1>
-    <p>Upload and view files for this room. <span class="notice">Admin can append <code>?admin=${ADMIN_PASS}</code> to the URL to reveal delete buttons.</span></p>
-
-    <div id="gate">
       <div class="row">
-        <a class="btn ok" href="#" id="yes">Yes, I’m 18+</a>
-        <a class="btn bad" href="#" id="no">No</a>
+        <input id="f" type="file" />
+        <button id="up" class="ok">Upload</button>
+        <button id="ref">Refresh</button>
+        <span style="flex:1"></span>
+        <button id="adminBtn">Admin</button>
+        <button id="logoutBtn" class="bad ${admin ? "" : "hide"}">Exit admin</button>
       </div>
-      <p class="notice">You must confirm your age to continue.</p>
+
+      <div id="warn" class="hide" style="color:#fbbf24;margin:8px 0">Uploading…</div>
+
+      <div id="list" class="thumbs">
+        ${files.map(f => `
+          <div class="tile">
+            ${f.type.startsWith("image/")
+              ? `<img src="${f.url}" alt="${f.name}">`
+              : `<div style="height:150px;display:grid;place-items:center;border:1px dashed #334155;border-radius:8px;">${f.type}</div>`}
+            <div class="meta">${f.name} · ${Math.ceil(f.size/1024)} KB</div>
+            <div class="row">
+              <a class="btn" href="${f.url}" download>Download</a>
+              ${admin ? `<button class="btn bad del" data-name="${encodeURIComponent(f.name)}">Delete</button>` : ""}
+            </div>
+          </div>
+        `).join("")}
+      </div>
+
     </div>
+  </div>
 
-    <div id="content" class="hide">
-      <form class="row" action="/upload/${safe}" method="post" enctype="multipart/form-data">
-        <input class="btn" type="file" name="file" required>
-        <button class="btn ok" type="submit">Upload</button>
-        <a class="btn" href="/room/${safe}">Refresh</a>
-      </form>
-
-      <div class="grid" style="margin-top:12px">${gallery || "<p>No files yet.</p>"}</div>
+  <div id="ageGate" class="card">
+    <div class="card">
+      <h1>18+</h1>
+      <p>You must be of legal age to access this content.</p>
+      <div class="row">
+        <button id="yes" class="ok">Yes</button>
+        <button id="no" class="bad">No</button>
+      </div>
     </div>
-  </div>`;
+  </div>
 
-  const scripts = `
-  <script>
-    const gate = document.getElementById('gate');
-    const content = document.getElementById('content');
-    const key = 'age_ok';
-    const ok = sessionStorage.getItem(key) === '1';
-    function show() { gate.classList.add('hide'); content.classList.remove('hide'); }
-    function hide(){ gate.classList.remove('hide'); content.classList.add('hide'); }
-    if (ok) show();
-    document.getElementById('yes').onclick = (e)=>{ e.preventDefault(); sessionStorage.setItem(key,'1'); show(); };
-    document.getElementById('no').onclick  = (e)=>{ e.preventDefault(); alert('You must be 18 or older.'); hide(); };
-  </script>`;
+<script>
+  const room = ${JSON.stringify(room)};
+  const adminOn = ${admin ? "true" : "false"};
 
-  res.send(page({ title: `Room ${safe}`, body, scripts }));
+  // 18+ gate using sessionStorage
+  const gate = document.getElementById('ageGate');
+  if (sessionStorage.getItem('age-ok') === '1') gate.style.display = 'none';
+  document.getElementById('yes').onclick = () => { sessionStorage.setItem('age-ok','1'); gate.style.display='none'; };
+  document.getElementById('no').onclick = () => { location.href = 'https://www.google.com'; };
+
+  // Upload
+  const f = document.getElementById('f');
+  document.getElementById('up').onclick = async () => {
+    if (!f.files || !f.files[0]) return alert('Pick a file first.');
+    document.getElementById('warn').classList.remove('hide');
+    const fd = new FormData();
+    fd.append('file', f.files[0]);
+    const r = await fetch('/upload/' + encodeURIComponent(room), { method: 'POST', body: fd });
+    document.getElementById('warn').classList.add('hide');
+    if (!r.ok) return alert('Upload failed');
+    location.reload();
+  };
+  document.getElementById('ref').onclick = () => location.reload();
+
+  // Delete (admin only)
+  document.querySelectorAll('.del').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this file?')) return;
+      const name = btn.dataset.name;
+      const r = await fetch('/delete/' + encodeURIComponent(room) + '/' + name, { method: 'POST' });
+      if (!r.ok) return alert('Delete failed');
+      location.reload();
+    };
+  });
+
+  // Admin login (no URL changes)
+  const adminBtn = document.getElementById('adminBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (adminOn) adminBtn.classList.add('hide');
+  adminBtn.onclick = async () => {
+    const pass = prompt('Admin password');
+    if (!pass) return;
+    const r = await fetch('/admin', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ pass })});
+    if (r.ok) location.reload(); else alert('Wrong password');
+  };
+  logoutBtn.onclick = async () => {
+    await fetch('/admin/logout', { method:'POST' });
+    location.reload();
+  };
+</script>
+</body>
+</html>`;
+  res.type("html").send(html);
 });
 
-// ====== UPLOAD ======
+// Upload
 app.post("/upload/:room", upload.single("file"), (req, res) => {
-  const room = req.params.room;
-  res.redirect(`/room/${encodeURIComponent(room)}`);
+  if (!req.file) return res.status(400).json({ ok:false, msg:"no-file" });
+  res.json({ ok:true });
 });
 
-// ====== DELETE (admin) ======
-app.get("/delete/:room/:name", (req, res) => {
-  if ((req.query.admin || "") !== ADMIN_PASS) return res.status(403).send("Forbidden");
-  const room = String(req.params.room);
-  const name = String(req.params.name);
-  const { dir } = roomDir(room);
-  const target = path.join(dir, name);
-  try {
-    fs.unlinkSync(target);
-  } catch {}
-  res.redirect(`/room/${encodeURIComponent(room)}?admin=${encodeURIComponent(ADMIN_PASS)}`);
+// Delete (admin only)
+app.post("/delete/:room/:name", (req, res) => {
+  if (!isAdminReq(req)) return res.status(401).json({ ok:false, msg:"admin-required" });
+  const room = req.params.room.toLowerCase();
+  const file = req.params.name;
+  const p = path.join(UPLOAD_DIR, room, file);
+  if (!p.startsWith(path.join(UPLOAD_DIR, room))) return res.status(400).json({ ok:false });
+  try { fs.unlinkSync(p); } catch { /* ignore */ }
+  res.json({ ok:true });
 });
 
-// ====== HEALTH ======
-app.get("/healthz", (req, res) => res.json({ ok: true }));
-
-// ====== START ======
 app.listen(PORT, () => {
-  console.log("Rooms server listening on", PORT);
+  console.log("Rooms app listening on", PORT);
 });
