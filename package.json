@@ -4,11 +4,10 @@
   "type": "module",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js",
-    "render-build": "echo 'build step not required'",
-    "render-start": "node app.js"
+    "start": "node app.js"
   },
   "dependencies": {
+    "cookie-parser": "^1.4.6",
     "express": "^4.19.2",
     "mime-types": "^2.1.35",
     "multer": "^1.4.5-lts.1",
