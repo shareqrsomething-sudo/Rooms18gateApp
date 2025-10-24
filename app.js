@@ -1,286 +1,265 @@
-// Rooms18gate — 18+ enforced per room, no Create on homepage, /manage for admin
-// Includes debug route to clear age cookies.
+// app.js — Rooms + hard 18+ gate
 
 import fs from "fs";
-import fsp from "fs/promises";
 import path from "path";
 import express from "express";
 import multer from "multer";
 import mime from "mime-types";
 import cookieParser from "cookie-parser";
-import { nanoid } from "nanoid";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
-const DATA_DIR = path.join(__dirname, "data");
-const ADMIN_PASS = process.env.ADMIN_PASS || "letmein";
-const MAX_FILE_MB = parseInt(process.env.MAX_FILE_MB || "25", 10);
-const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
+// ---------- config ----------
+const DATA = path.join(__dirname, "data");
+const ADMIN_PASS = process.env.ADMIN_PASS || "letmein"; // change in Render env
+const COOKIE_SECRET = process.env.COOKIE_SECRET || "change-me"; // set in Render
+const AGE_COOKIE = "age_ok";
+const MAX_UPLOAD_MB = 50;
 
-const roomDir = (r) => path.join(DATA_DIR, r);
-const sanitizeRoom = (s) => {
-  if (typeof s !== "string") return "";
-  const t = s.trim().toLowerCase();
-  return /^[a-z0-9-]{1,40}$/.test(t) ? t : "";
-};
-const escapeHtml = (s) =>
-  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const isAdminReq = (req) => req.cookies?.admin === "1";
-const setAdmin = (res) => res.cookie("admin", "1", { httpOnly: true, sameSite: "Lax", maxAge: 24 * 3600 * 1000 });
-const clearAdmin = (res) => res.clearCookie("admin");
+// ensure data dir
+fs.mkdirSync(DATA, { recursive: true });
 
-async function ensureBase() { await fsp.mkdir(DATA_DIR, { recursive: true }); }
-async function ensureRoom(r) { await ensureBase(); await fsp.mkdir(roomDir(r), { recursive: true }); }
-async function listRooms() {
-  await ensureBase();
-  const entries = await fsp.readdir(DATA_DIR, { withFileTypes: true });
-  return entries.filter(e => e.isDirectory()).map(e => e.name).sort();
-}
-async function listFiles(room) {
-  try {
-    const entries = await fsp.readdir(roomDir(room), { withFileTypes: true });
-    const out = [];
-    for (const e of entries) {
-      if (!e.isFile()) continue;
-      const full = path.join(roomDir(room), e.name);
-      const st = await fsp.stat(full);
-      out.push({ name: e.name, size: st.size, mtime: st.mtimeMs, mime: mime.lookup(e.name) || "application/octet-stream" });
-    }
-    out.sort((a, b) => b.mtime - a.mtime);
-    return out;
-  } catch { return []; }
-}
-
+// uploads per room -> ./data/<room>/
 const storage = multer.diskStorage({
-  destination: async (req, _file, cb) => {
-    const room = sanitizeRoom(req.params.room || req.body.room || "");
-    if (!room) return cb(new Error("bad room"));
-    await ensureRoom(room);
-    cb(null, roomDir(room));
+  destination: (req, file, cb) => {
+    const room = req.params.room;
+    const dir = path.join(DATA, room);
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
   },
-  filename: (_req, file, cb) => {
-    const ext = mime.extension(file.mimetype) || path.extname(file.originalname).slice(1) || "bin";
-    cb(null, `${Date.now()}_${nanoid(6)}.${ext}`);
-  },
+  filename: (req, file, cb) => {
+    const ts = Date.now();
+    const safe = file.originalname.replace(/[^\w.\-]+/g, "_").slice(-100);
+    cb(null, `${ts}-${safe}`);
+  }
 });
-const upload = multer({ storage, limits: { fileSize: MAX_FILE_BYTES } });
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 }
+});
 
-app.use(cookieParser());
-app.use(express.urlencoded({ extended: false }));
+// ---------- middleware ----------
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(cookieParser(COOKIE_SECRET));
+app.use("/static", express.static(path.join(__dirname, "static")));
 
-const AGE_PREFIX = "age_ok_";
-const ageCookie = (r) => AGE_PREFIX + r;
+// 18+ gate middleware (protect everything except gate endpoints and static)
+const ageGate = (req, res, next) => {
+  // allow the gate endpoints and static
+  const openPaths = ["/gate", "/gate/ok", "/gate/reset"];
+  if (openPaths.includes(req.path) || req.path.startsWith("/static/")) {
+    return next();
+  }
+  if (req.signedCookies[AGE_COOKIE] === "1") return next();
+  // Not verified -> show gate
+  res.redirect(`/gate?next=${encodeURIComponent(req.originalUrl)}`);
+};
 
-function shell(inner, title = "Rooms") {
-  return `<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(title)}</title>
+// apply gate
+app.use(ageGate);
+
+// ---------- gate routes ----------
+app.get("/gate", (req, res) => {
+  const next = req.query.next || "/";
+  res.send(`
+<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>18+</title>
 <style>
-:root{--bg:#0b0c0f;--card:#111827;--mut:#9ca3af;--fg:#e5e7eb;--accent:#6366f1;--bad:#ef4444}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Roboto}
-main{max-width:900px;margin:0 auto;padding:28px}
-.card{background:var(--card);padding:18px;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.35)}
-h1,h2{margin:6px 0 12px} p{color:var(--mut)}
-.btn{display:inline-block;padding:10px 14px;border-radius:10px;background:var(--accent);color:#fff;text-decoration:none;border:none;cursor:pointer}
-.btn:hover{opacity:.95}
-.bad{background:var(--bad);color:#fff;border:none;border-radius:10px;padding:10px 14px;cursor:pointer}
-.row{display:flex;gap:10px;flex-wrap:wrap}
-.rooms{display:grid;gap:10px}
-.roomrow{display:flex;align-items:center;gap:10px}
-input[type=text],input[type=file],input[type=password]{flex:1;min-width:220px;padding:10px;border-radius:10px;border:1px solid #333;background:#0f1420;color:#fff}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;margin-top:12px}
-.tile{background:#0f1420;border:1px solid #1f2937;border-radius:12px;padding:10px}
-.tile img{width:100%;height:140px;object-fit:cover;border-radius:8px;background:#0b0c0f}
-small{color:var(--mut)}
-.center{display:flex;align-items:center;justify-content:center;min-height:40vh}
-</style></head><body><main class="card">${inner}</main></body></html>`;
-}
+  body{background:#0b0c0f;color:#eaeef5;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       display:grid;place-items:center;min-height:100dvh;margin:0}
+  .card{background:#111827;border:1px solid #232936;border-radius:14px;padding:28px;max-width:560px;width:92%}
+  h1{margin:0 0 14px;font-size:28px} p{opacity:.85;margin:0 0 18px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  a.btn,button{flex:1 1 180px;padding:12px;border:0;border-radius:10px;font-weight:700;font-size:16px;cursor:pointer;text-align:center}
+  .yes{background:#22c55e;color:#062}
+  .no{background:#374151;color:#cbd5e1}
+</style>
+<div class="card">
+  <h1>Are you 18 or older?</h1>
+  <p>You must confirm your age to continue.</p>
+  <div class="row">
+    <form method="post" action="/gate/ok">
+      <input type="hidden" name="next" value="${next}">
+      <button class="yes" type="submit">Yes</button>
+    </form>
+    <a class="btn no" href="https://www.google.com">No</a>
+  </div>
+</div>
+  `);
+});
 
-function homeView(rooms, admin) {
-  return shell(`
+app.post("/gate/ok", (req, res) => {
+  const next = req.body.next || "/";
+  // 7 days
+  res.cookie(AGE_COOKIE, "1", { signed: true, httpOnly: true, sameSite: "lax", maxAge: 7*24*60*60*1000 });
+  res.redirect(next);
+});
+
+app.get("/gate/reset", (req, res) => {
+  res.clearCookie(AGE_COOKIE);
+  res.redirect("/gate");
+});
+
+// ---------- helpers ----------
+const listRooms = () =>
+  fs.readdirSync(DATA, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name)
+    .sort();
+
+const isValidRoom = name => /^[a-z0-9-]{1,40}$/.test(name);
+
+// ---------- landing (no create unless admin) ----------
+app.get("/", (req, res) => {
+  const rooms = listRooms();
+  const isAdmin = req.query.admin === ADMIN_PASS;
+  const createUI = isAdmin ? `
+  <h2>Create room</h2>
+  <form method="post" action="/rooms">
+    <input name="name" placeholder="room-name (letters/numbers/dashes)" required pattern="[a-z0-9-]{1,40}">
+    <button type="submit">Create</button>
+  </form>` : "";
+
+  const adminBtn = isAdmin
+    ? `<a class="btn" href="/">Exit admin</a>`
+    : `<a class="btn" href="/?admin=${encodeURIComponent(ADMIN_PASS)}">Admin</a>`;
+
+  res.send(`
+<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rooms</title>
+<style>
+body{background:#0b0c0f;color:#eaeef5;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:26px}
+.card{background:#111827;border:1px solid #232936;border-radius:14px;padding:22px;max-width:760px;margin:0 auto}
+h1{margin:0 0 12px} h2{margin:18px 0 10px}
+a.btn,button{display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;border:0;font-weight:700}
+ul{list-style:none;padding:0;margin:10px 0 0} li{margin:6px 0}
+.room{background:#0f172a;border-radius:8px;padding:10px 12px;border:1px solid #23303f}
+input{background:#0f172a;border:1px solid #23303f;color:#eaeef5;border-radius:8px;padding:10px;width:100%;max-width:360px;margin-right:8px}
+</style>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center">
     <h1>Rooms</h1>
-    <div class="row">
-      ${admin
-        ? `<form method="post" action="/admin/logout"><button class="bad">Exit admin</button></form>
-           <a class="btn" href="/manage">Manage</a>`
-        : `<a class="btn" href="/admin">Admin</a>`}
-    </div>
-    <h2>Existing rooms</h2>
-    <div class="rooms">
-      ${rooms.length ? rooms.map(r => `<div class="roomrow"><a class="btn" href="/r/${r}">${r}</a></div>`).join("") : `<p><i>No rooms yet.</i></p>`}
-    </div>
+    ${adminBtn}
+  </div>
+
+  <h2>Existing rooms</h2>
+  ${rooms.length ? `<ul>${rooms.map(r=>`<li class="room"><a class="btn" href="/r/${r}">Enter: ${r}</a></li>`).join("")}</ul>` : `<p>No rooms yet.</p>`}
+
+  ${createUI}
+</div>
   `);
-}
+});
 
-function manageView(rooms) {
-  return shell(`
-    <h1>Manage</h1>
-    <a class="btn" href="/">Back</a>
-    <form method="post" action="/admin/logout" style="display:inline"><button class="bad">Exit admin</button></form>
-    <h2>Create room</h2>
-    <form method="post" action="/create-room" class="row">
-      <input type="text" name="room" placeholder="room-name (letters/numbers/dashes)" required pattern="[a-z0-9-]{1,40}">
-      <button class="btn">Create</button>
-    </form>
-    <h2 style="margin-top:20px">Delete room</h2>
-    ${rooms.map(r => `<form method="post" action="/delete-room/${r}" class="row"><input name="confirm" placeholder="type: ${r}" required><button class="bad">Delete ${r}</button></form>`).join("") || "<p><i>No rooms.</i></p>"}
-  `);
-}
+// create room (admin only)
+app.post("/rooms", (req, res) => {
+  if (req.query.admin !== ADMIN_PASS) return res.status(403).send("Admin only");
+  const name = (req.body.name || "").trim();
+  if (!isValidRoom(name)) return res.status(400).send("Invalid room name");
+  fs.mkdirSync(path.join(DATA, name), { recursive: true });
+  res.redirect(`/?admin=${encodeURIComponent(ADMIN_PASS)}`);
+});
 
-function adminView(err = "") {
-  return shell(`
-    <h1>Admin login</h1>
-    ${err ? `<p style="color:#fca5a5">${escapeHtml(err)}</p>` : ""}
-    <form method="post" action="/admin" class="row">
-      <input type="password" name="pass" placeholder="Password" required>
-      <button class="btn">Login</button>
-      <a class="btn" href="/">Cancel</a>
-    </form>
-  `);
-}
+// delete room (admin only, with confirm parameter)
+app.post("/r/:room/delete", (req, res) => {
+  if (req.query.admin !== ADMIN_PASS) return res.status(403).send("Admin only");
+  const room = req.params.room;
+  const confirm = req.body.confirm || "";
+  if (confirm !== room) return res.status(400).send("Type the room name to confirm deletion.");
+  const dir = path.join(DATA, room);
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  res.redirect(`/?admin=${encodeURIComponent(ADMIN_PASS)}`);
+});
 
-function ageView(room) {
-  return shell(`
-    <div class="center">
-      <div>
-        <h1>18+</h1>
-        <p>You must confirm your age to enter <b>${escapeHtml(room)}</b>.</p>
-        <form method="post" action="/age-ok/${encodeURIComponent(room)}">
-          <button class="btn" type="submit">I am 18 or older</button>
-        </form>
-      </div>
-    </div>
-  `, "18+ Check");
-}
+// room page
+app.get("/r/:room", (req, res) => {
+  const room = req.params.room;
+  if (!isValidRoom(room)) return res.status(404).send("Room not found");
+  const dir = path.join(DATA, room);
+  fs.mkdirSync(dir, { recursive: true });
+  const files = fs.readdirSync(dir).map(name => {
+    const p = path.join(dir, name);
+    const stat = fs.statSync(p);
+    return { name, bytes: stat.size, type: mime.lookup(name) || "application/octet-stream" };
+  });
+  const admin = req.query.admin === ADMIN_PASS;
 
-function roomView(room, files, admin) {
-  return shell(`
-    <h1>Room: ${escapeHtml(room)}</h1>
-    <form class="row" method="post" enctype="multipart/form-data" action="/upload/${encodeURIComponent(room)}">
-      <input type="file" name="file" required>
-      <button class="btn">Upload</button>
+  res.send(`
+<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room: ${room}</title>
+<style>
+body{background:#0b0c0f;color:#eaeef5;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:26px}
+.card{background:#111827;border:1px solid #232936;border-radius:14px;padding:22px;max-width:900px;margin:0 auto}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+.item{background:#0f172a;border:1px solid #23303f;border-radius:10px;padding:10px}
+a.btn,button{display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;border:0;font-weight:700}
+.del{background:#dc2626}
+input{background:#0f172a;border:1px solid #23303f;color:#eaeef5;border-radius:8px;padding:10px}
+</style>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <h1>Room: ${room}</h1>
+    <div>
       <a class="btn" href="/">Rooms</a>
-      ${admin ? `<a class="btn" href="/manage">Manage</a>` : ""}
-    </form>
-    <h2 style="margin-top:18px">Files</h2>
-    <div class="grid">
-      ${files.length ? files.map(f => fileTile(room, f, admin)).join("") : "<p><i>No files yet.</i></p>"}
+      ${admin ? `<a class="btn" href="/r/${room}">Exit admin</a>` : `<a class="btn" href="/r/${room}?admin=${encodeURIComponent(ADMIN_PASS)}">Admin</a>`}
     </div>
+  </div>
+
+  <form method="post" action="/upload/${room}" enctype="multipart/form-data" style="margin:10px 0 18px;display:flex;gap:10px;flex-wrap:wrap">
+    <input type="file" name="file" required>
+    <button type="submit">Upload</button>
+  </form>
+
+  ${admin ? `
+  <form method="post" action="/r/${room}/delete" onsubmit="return confirm('Type the room name to confirm deletion');" style="margin:4px 0 16px">
+    <input name="confirm" placeholder="type '${room}' to delete room" required pattern="${room}">
+    <button class="del" type="submit">Delete Room</button>
+  </form>` : ``}
+
+  <div class="grid">
+    ${files.map(f=>{
+      const enc = encodeURIComponent(f.name);
+      const href = \`/file/${encodeURIComponent(room)}/${enc}\`;
+      const del = admin ? \`<form method="post" action="/delete/${encodeURIComponent(room)}/${enc}?admin=${encodeURIComponent(ADMIN_PASS)}" onsubmit="return confirm('Delete ${f.name}?')"><button class="del">Delete</button></form>\` : "";
+      return \`<div class="item"><div style="margin:6px 0 8px;word-break:break-word">\${f.name}</div>
+              <a class="btn" href="\${href}" download>Download</a> \${del}</div>\`;
+    }).join("")}
+  </div>
+</div>
   `);
-}
-
-function fileTile(room, f, admin) {
-  const isImg = ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(f.mime);
-  const src = `/file/${room}/${f.name}`;
-  const dl = `/download/${room}/${f.name}`;
-  const del = `/delete/${room}/${f.name}`;
-  return `<div class="tile">
-    ${isImg ? `<a href="${src}" target="_blank"><img src="${src}" alt=""></a>` : `<div style="height:140px;display:flex;align-items:center;justify-content:center;background:#0b0c0f;border-radius:8px"><small>${escapeHtml(f.mime)}</small></div>`}
-    <div style="margin-top:8px"><small>${f.name} · ${(f.size / 1048576).toFixed(1)} MB</small></div>
-    <div class="row" style="margin-top:8px">
-      <a class="btn" href="${dl}">Download</a>
-      ${admin ? `<form method="post" action="${del}" onsubmit="return confirm('Delete ${f.name}?')"><button class="bad">Delete</button></form>` : ""}
-    </div>
-  </div>`;
-}
-
-// ROUTES
-app.get("/", async (req, res) => {
-  const rooms = await listRooms();
-  res.type("html").send(homeView(rooms, isAdminReq(req)));
 });
 
-app.get("/admin", (req, res) => {
-  if (isAdminReq(req)) return res.redirect("/");
-  res.type("html").send(adminView());
-});
-app.post("/admin", (req, res) => {
-  const pass = (req.body?.pass || "").trim();
-  if (pass !== ADMIN_PASS) return res.status(401).type("html").send(adminView("Wrong password"));
-  setAdmin(res);
-  res.redirect("/");
-});
-app.post("/admin/logout", (_req, res) => {
-  clearAdmin(res);
-  res.redirect("/");
-});
-
-app.get("/manage", async (req, res) => {
-  if (!isAdminReq(req)) return res.status(403).send("admin only");
-  const rooms = await listRooms();
-  res.type("html").send(manageView(rooms));
-});
-
-app.post("/create-room", async (req, res) => {
-  if (!isAdminReq(req)) return res.status(403).send("admin only");
-  const room = sanitizeRoom(req.body.room || "");
-  if (!room) return res.status(400).send("bad room");
-  await ensureRoom(room);
-  res.redirect(`/r/${room}`);
-});
-
-app.get("/r/:room", async (req, res) => {
-  const room = sanitizeRoom(req.params.room);
-  if (!room || !fs.existsSync(roomDir(room))) return res.status(404).send("not found");
-  const ok = req.cookies[ageCookie(room)] === "1";
-  if (!ok) return res.type("html").send(ageView(room));
-  const files = await listFiles(room);
-  res.type("html").send(roomView(room, files, isAdminReq(req)));
-});
-
-app.post("/age-ok/:room", (req, res) => {
-  const room = sanitizeRoom(req.params.room);
-  res.cookie(ageCookie(room), "1", { httpOnly: false, sameSite: "Lax", maxAge: 365 * 24 * 3600 * 1000 });
-  res.redirect(`/r/${room}`);
-});
-
+// upload one file
 app.post("/upload/:room", upload.single("file"), (req, res) => {
-  const room = sanitizeRoom(req.params.room);
-  res.redirect(`/r/${room}`);
+  if (!req.file) return res.status(400).send("No file");
+  res.redirect(`/r/${encodeURIComponent(req.params.room)}`);
 });
 
+// serve / download a file
 app.get("/file/:room/:name", (req, res) => {
-  const room = sanitizeRoom(req.params.room);
-  const name = path.basename(req.params.name);
-  const full = path.join(roomDir(room), name);
-  if (!fs.existsSync(full)) return res.status(404).send("not found");
-  res.type(mime.lookup(full) || "application/octet-stream");
-  fs.createReadStream(full).pipe(res);
-});
-app.get("/download/:room/:name", (req, res) => {
-  const room = sanitizeRoom(req.params.room);
-  const name = path.basename(req.params.name);
-  res.download(path.join(roomDir(room), name));
+  const p = path.join(DATA, req.params.room, req.params.name);
+  if (!fs.existsSync(p)) return res.status(404).send("Not found");
+  res.download(p, req.params.name);
 });
 
-app.post("/delete/:room/:name", async (req, res) => {
-  if (!isAdminReq(req)) return res.status(403).send("admin only");
-  const room = sanitizeRoom(req.params.room);
-  const name = path.basename(req.params.name);
-  await fsp.unlink(path.join(roomDir(room), name)).catch(() => {});
-  res.redirect(`/r/${room}`);
-});
-app.post("/delete-room/:room", async (req, res) => {
-  if (!isAdminReq(req)) return res.status(403).send("admin only");
-  const room = sanitizeRoom(req.params.room);
-  const typed = (req.body?.confirm || "").trim();
-  if (typed !== room) return res.status(400).send("confirmation mismatch");
-  await fsp.rm(roomDir(room), { recursive: true, force: true });
-  res.redirect("/manage");
+// delete a file (admin)
+app.post("/delete/:room/:name", (req, res) => {
+  if (req.query.admin !== ADMIN_PASS) return res.status(403).send("Admin only");
+  const p = path.join(DATA, req.params.room, req.params.name);
+  fs.existsSync(p) && fs.unlinkSync(p);
+  res.redirect(`/r/${encodeURIComponent(req.params.room)}?admin=${encodeURIComponent(ADMIN_PASS)}`);
 });
 
-// DEBUG clear age cookie
-app.get("/debug/clear-age/:room", (req, res) => {
-  const room = sanitizeRoom(req.params.room);
-  res.clearCookie(ageCookie(room));
-  res.send(`Cleared age cookie for ${room}. Now visit /r/${room}`);
-});
+// health
+app.get("/healthz", (_, res) => res.send("ok"));
 
-await ensureBase();
-app.listen(PORT, () => console.log("Rooms server on :" + PORT));
+app.listen(PORT, () => {
+  console.log("listening on", PORT);
+});
